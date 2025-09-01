@@ -61,6 +61,24 @@ export function sortRows(
   return copy;
 }
 
+export function sortRowsMulti(
+  rows: Record<string, string>[],
+  criteria: { column: string; direction: 'asc' | 'desc' }[]
+): Record<string, string>[] {
+  if (!criteria.length) return [...rows];
+  const copy = [...rows];
+  copy.sort((a, b) => {
+    for (const { column, direction } of criteria) {
+      const av = a[column] ?? '';
+      const bv = b[column] ?? '';
+      const cmp = String(av).localeCompare(String(bv), 'he');
+      if (cmp !== 0) return direction === 'asc' ? cmp : -cmp;
+    }
+    return 0;
+  });
+  return copy;
+}
+
 export function areDatasetsEqual(
   a: Record<string, string>[],
   b: Record<string, string>[]
@@ -102,5 +120,29 @@ export function diffDatasets(
     if (!equal) diffs.push({ index: i, left, right });
   }
   return diffs;
+}
+
+export type CellType = 'empty' | 'number' | 'date' | 'boolean' | 'string';
+
+export function detectCellType(value: string): CellType {
+  const v = (value ?? '').trim();
+  if (v === '') return 'empty';
+
+  // boolean
+  const lower = v.toLowerCase();
+  if (lower === 'true' || lower === 'false') return 'boolean';
+
+  // number
+  if (/^[+-]?(\d+)(\.\d+)?$/.test(v)) return 'number';
+
+  // date (basic heuristics)
+  const dateLike = /^(\d{4}-\d{2}-\d{2})([ tT]\d{2}:\d{2}(:\d{2})?)?$/.test(v) ||
+                   /^(\d{1,2}[/. -]\d{1,2}[/. -]\d{2,4})$/.test(v);
+  if (dateLike) {
+    const t = Date.parse(v.replace('T', ' '));
+    if (!Number.isNaN(t)) return 'date';
+  }
+
+  return 'string';
 }
 

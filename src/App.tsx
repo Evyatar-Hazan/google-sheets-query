@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { parseXlsxFile, sortRows, areDatasetsEqual, diffDatasets } from './utils/xlsx';
+import { parseXlsxFile, sortRowsMulti, areDatasetsEqual, diffDatasets, detectCellType, CellType } from './utils/xlsx';
+import ExcelJS from 'exceljs';
 
 type Row = Record<string, string>;
 
@@ -47,8 +48,11 @@ function App() {
   const [right, setRight] = useState<{ headers: string[]; rows: Row[] } | null>(null);
   const [column, setColumn] = useState<string>('');
   const [direction, setDirection] = useState<SortDirection>('asc');
+  const [multiSort, setMultiSort] = useState<{ column: string; direction: SortDirection }[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [enableTypeCheck, setEnableTypeCheck] = useState<boolean>(false);
+  const [ignoredCellKeys, setIgnoredCellKeys] = useState<string[]>([]);
 
   const unifiedHeaders = useMemo(() => {
     const set = new Set<string>();
@@ -57,8 +61,14 @@ function App() {
     return Array.from(set);
   }, [left, right]);
 
-  const sortedLeft = useMemo(() => (left && column ? sortRows(left.rows, column, direction) : left?.rows || []), [left, column, direction]);
-  const sortedRight = useMemo(() => (right && column ? sortRows(right.rows, column, direction) : right?.rows || []), [right, column, direction]);
+  const activeCriteria = useMemo(() => {
+    const base = column ? [{ column, direction }] : [];
+    // Append additional criteria, avoiding duplicate columns
+    return [...base, ...multiSort.filter((c) => c.column && !base.find((b) => b.column === c.column))];
+  }, [column, direction, multiSort]);
+
+  const sortedLeft = useMemo(() => (left ? (activeCriteria.length ? sortRowsMulti(left.rows, activeCriteria) : left.rows) : []), [left, activeCriteria]);
+  const sortedRight = useMemo(() => (right ? (activeCriteria.length ? sortRowsMulti(right.rows, activeCriteria) : right.rows) : []), [right, activeCriteria]);
 
   const equal = useMemo(() => {
     if (!left || !right || !column) return null;
@@ -69,6 +79,96 @@ function App() {
     if (!left || !right || !column) return [] as ReturnType<typeof diffDatasets>;
     return diffDatasets(sortedLeft, sortedRight);
   }, [left, right, column, sortedLeft, sortedRight]);
+
+  const ignoredSet = useMemo(() => new Set(ignoredCellKeys), [ignoredCellKeys]);
+
+  const differencesForDisplay = useMemo(() => {
+    if (!left || !right || !column) return [] as ReturnType<typeof diffDatasets>;
+    return differences.filter((d) => {
+      return unifiedHeaders.some((h) => {
+        const lv = d.left?.[h] ?? '';
+        const rv = d.right?.[h] ?? '';
+        const valueDiffers = lv !== rv;
+        let typeMismatch = false;
+        if (enableTypeCheck) {
+          typeMismatch = detectCellType(lv) !== detectCellType(rv);
+        }
+        const key = `${d.index}:${h}`;
+        return (valueDiffers || typeMismatch) && !ignoredSet.has(key);
+      });
+    });
+  }, [differences, unifiedHeaders, enableTypeCheck, ignoredSet, left, right, column]);
+
+  function toggleIgnoreCell(rowIndex: number, header: string) {
+    const key = `${rowIndex}:${header}`;
+    setIgnoredCellKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }
+
+  async function downloadDifferencesXlsx() {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Differences');
+
+    const headerRow = ['#'];
+    unifiedHeaders.forEach((h) => {
+      headerRow.push(`${h} - שמאל`);
+      headerRow.push(`${h} - ימין`);
+    });
+    const hr = sheet.addRow(headerRow);
+    hr.font = { bold: true };
+
+    differencesForDisplay.forEach((d) => {
+      const rowValues: (string | number)[] = [d.index + 1];
+      unifiedHeaders.forEach((h) => {
+        const lv = d.left?.[h] ?? '';
+        const rv = d.right?.[h] ?? '';
+        rowValues.push(lv, rv);
+      });
+      const row = sheet.addRow(rowValues);
+
+      // color cells that differ (value or type when enabled)
+      unifiedHeaders.forEach((h, idx) => {
+        const colLeft = 2 + idx * 2; // 1-based column index for left value
+        const colRight = colLeft + 1;
+        const lv = d.left?.[h] ?? '';
+        const rv = d.right?.[h] ?? '';
+        const valueDiffers = lv !== rv;
+        let typeMismatch = false;
+        if (enableTypeCheck) {
+          typeMismatch = detectCellType(lv) !== detectCellType(rv);
+        }
+        const key = `${d.index}:${h}`;
+        const isIgnored = ignoredSet.has(key);
+        const shouldHighlight = (valueDiffers || typeMismatch) && !isIgnored;
+        if (shouldHighlight) {
+          const fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3CD' } };
+          row.getCell(colLeft).fill = fill as any;
+          row.getCell(colRight).fill = fill as any;
+        }
+      });
+    });
+
+    // autosize columns safely
+    for (let i = 1; i <= sheet.columnCount; i++) {
+      let max = 10;
+      sheet.eachRow({ includeEmpty: true }, (row) => {
+        const cell = row.getCell(i);
+        const len = cell && cell.value != null ? String(cell.value).length : 0;
+        if (len > max) max = len;
+      });
+      sheet.getColumn(i).width = Math.min(60, max + 2);
+    }
+
+    const base = 'differences';
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${base}-${ts}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   async function handleFiles(side: 'left' | 'right', files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -130,7 +230,50 @@ function App() {
           <option value="asc">עולה</option>
           <option value="desc">יורד</option>
         </select>
+        <button onClick={() => setMultiSort((prev) => [...prev, { column: '', direction: 'asc' }])}>
+          הוסף שדה מיון
+        </button>
+        <label style={{ marginInlineStart: 12 }}>
+          <input type="checkbox" checked={enableTypeCheck} onChange={(e) => setEnableTypeCheck(e.target.checked)} /> בדיקת סוגים
+        </label>
       </div>
+
+      {multiSort.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: '1rem' }}>
+          {multiSort.map((c, idx) => (
+            <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <label>שדה נוסף:</label>
+              <select
+                value={c.column}
+                onChange={(e) => {
+                    const v = e.target.value;
+                    setMultiSort((prev) => prev.map((pc, i) => (i === idx ? { ...pc, column: v } : pc)));
+                  }}
+              >
+                <option value="" disabled>
+                  בחרו עמודה
+                </option>
+                {unifiedHeaders.map((h) => (
+                  <option key={h} value={h} disabled={h === column || multiSort.some((ms, j) => j !== idx && ms.column === h)}>
+                    {h}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={c.direction}
+                onChange={(e) => {
+                  const v = e.target.value as SortDirection;
+                  setMultiSort((prev) => prev.map((pc, i) => (i === idx ? { ...pc, direction: v } : pc)));
+                }}
+              >
+                <option value="asc">עולה</option>
+                <option value="desc">יורד</option>
+              </select>
+              <button onClick={() => setMultiSort((prev) => prev.filter((_, i) => i !== idx))}>הסר</button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {error && <div style={{ color: 'red', marginBottom: '1rem' }}>{error}</div>}
 
@@ -145,9 +288,12 @@ function App() {
               <span style={{ color: 'crimson' }}>הקבצים שונים לאחר מיון לפי "{column}"</span>
             )}
           </div>
-          {!equal && differences.length > 0 && (
+          {!equal && differencesForDisplay.length > 0 && (
             <div>
-              <strong>הבדלים ({differences.length}):</strong>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <strong>הבדלים ({differencesForDisplay.length}):</strong>
+                <button onClick={downloadDifferencesXlsx}>הורד תוצאות (XLSX)</button>
+              </div>
               <table border={1} cellPadding={6} style={{ marginTop: 8, width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
@@ -158,22 +304,49 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {differences.map((d) => (
+                  {differencesForDisplay.map((d) => (
                     <tr key={d.index}>
 
                       <td>{d.index + 1}</td>
                       {unifiedHeaders.map((h) => (
-                        <td
-                          key={h}
-                          style={{
-                            background:
-                              (d.left?.[h] ?? '') !== (d.right?.[h] ?? '') ? '#fff3cd' : 'transparent',
-                          }}
-                        >
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                            <span title="שמאל" style={{ color: '#333' }}>{d.left?.[h] ?? ''}</span>
-                            <span title="ימין" style={{ color: '#666' }}>{d.right?.[h] ?? ''}</span>
-                          </div>
+                        <td key={h}>
+                          {(() => {
+                            const lv = d.left?.[h] ?? '';
+                            const rv = d.right?.[h] ?? '';
+                            const valueDiffers = lv !== rv;
+                            let typeMismatch = false;
+                            let lt: CellType | undefined;
+                            let rt: CellType | undefined;
+                            if (enableTypeCheck) {
+                              lt = detectCellType(lv);
+                              rt = detectCellType(rv);
+                              typeMismatch = lt !== rt;
+                            }
+                            const key = `${d.index}:${h}`;
+                            const isIgnored = ignoredSet.has(key);
+                            const shouldHighlight = (valueDiffers || typeMismatch) && !isIgnored;
+                            const bg = shouldHighlight ? '#fff3cd' : 'transparent';
+                            return (
+                              <div style={{ background: bg, padding: 4 }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                  <span title="שמאל" style={{ color: '#333' }}>{lv}</span>
+                                  <span title="ימין" style={{ color: '#666' }}>{rv}</span>
+                                </div>
+                                {enableTypeCheck && (
+                                  <div style={{ marginTop: 4, fontSize: 11, color: typeMismatch ? '#a30000' : '#666' }}>
+                                    סוגים: {lt} | {rt}
+                                  </div>
+                                )}
+                                {(valueDiffers || typeMismatch) && (
+                                  <div style={{ marginTop: 6 }}>
+                                    <button onClick={() => toggleIgnoreCell(d.index, h)}>
+                                      {isIgnored ? 'החזר לבדיקה' : 'סמן תקין'}
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </td>
                       ))}
                     </tr>
@@ -189,3 +362,4 @@ function App() {
 }
 
 export default App;
+
