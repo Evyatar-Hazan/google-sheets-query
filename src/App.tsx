@@ -108,11 +108,9 @@ function App() {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Differences');
 
+    // Header: index + one column per header (values stacked: left then right)
     const headerRow = ['#'];
-    unifiedHeaders.forEach((h) => {
-      headerRow.push(`${h} - שמאל`);
-      headerRow.push(`${h} - ימין`);
-    });
+    unifiedHeaders.forEach((h) => headerRow.push(h));
     const hr = sheet.addRow(headerRow);
     hr.font = { bold: true };
 
@@ -121,14 +119,13 @@ function App() {
       unifiedHeaders.forEach((h) => {
         const lv = d.left?.[h] ?? '';
         const rv = d.right?.[h] ?? '';
-        rowValues.push(lv, rv);
+        rowValues.push(`${lv}\n${rv}`);
       });
       const row = sheet.addRow(rowValues);
 
-      // color cells that differ (value or type when enabled)
+      // color and wrap cells that differ (value or type when enabled)
       unifiedHeaders.forEach((h, idx) => {
-        const colLeft = 2 + idx * 2; // 1-based column index for left value
-        const colRight = colLeft + 1;
+        const col = 2 + idx; // 1-based column index for combined cell
         const lv = d.left?.[h] ?? '';
         const rv = d.right?.[h] ?? '';
         const valueDiffers = lv !== rv;
@@ -139,10 +136,10 @@ function App() {
         const key = `${d.index}:${h}`;
         const isIgnored = ignoredSet.has(key);
         const shouldHighlight = (valueDiffers || typeMismatch) && !isIgnored;
+        const cell = row.getCell(col);
+        cell.alignment = { wrapText: true, vertical: 'top' };
         if (shouldHighlight) {
-          const fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3CD' } };
-          row.getCell(colLeft).fill = fill as any;
-          row.getCell(colRight).fill = fill as any;
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3CD' } } as any;
         }
       });
     });
@@ -152,7 +149,9 @@ function App() {
       let max = 10;
       sheet.eachRow({ includeEmpty: true }, (row) => {
         const cell = row.getCell(i);
-        const len = cell && cell.value != null ? String(cell.value).length : 0;
+        const value = cell && cell.value != null ? String(cell.value) : '';
+        // consider line breaks
+        const len = value.split('\n').reduce((m, s) => Math.max(m, s.length), 0);
         if (len > max) max = len;
       });
       sheet.getColumn(i).width = Math.min(60, max + 2);
